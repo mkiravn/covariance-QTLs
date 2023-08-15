@@ -1,0 +1,36 @@
+---
+title: "Covariance QTLs"
+output: html_notebook
+---
+
+## Marida's sumemr rotation, 2023
+
+### Background
+- CLIP
+- correlated symptoms. MDD and evidence this is important
+
+### Key Question
+Can we explain heritability through effects on the covariance?
+
+
+### Our model
+Suppose a disease diagnosis involves some function $f$ of a set of $p$ symptoms $X$. We are interested in assessing to what extent we can find heritability in the disease, purely due to the covariance between symptoms (rather than genetic effects on the symptoms directly). 
+
+To investigate this, we have a model where each individual has their own covariance matrix, which is fully determined by one parameter $w$. $w$ represents the covariance between the symptoms: $\Sigma_i := w_i J + (1-w_i) I$, where $J$ is a $(p \times p)$ matrix of ones. Genetic effects occur on $w$: $w= \beta G + E$. This leads to a *covariance heritability*, which we call $h^2_w$. In full,
+
+\begin{align*}
+w   &\sim N(0,h^2_w K + (1-h^2_w) I ) \\
+\Sigma_i &:= w_i J + (1-w_i) I \\
+X_{i,} | \Sigma_i &\sim N(0,\Sigma_i) \\
+y_i &= f(X_{i,} )
+\end{align*}
+
+#### Choosing $f(X)
+In this project, we chose a simple function: $n$ or more of the symtpoms being above some threshold.
+
+
+## Can heritability be explained through covariance?
+
+
+
+
