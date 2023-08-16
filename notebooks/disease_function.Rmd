@@ -1,0 +1,882 @@
+---
+title: "Expploring disease activation functions"
+output: html_notebook
+---
+
+In this notebook, we'll look at how changing the disease activation fucntion affects prevalence, heritability, etc.
+
+```{r}
+library(tidyverse)
+library(MASS)
+library(fastmatrix)
+library(tidyverse)
+library(matlib)
+
+simulate_genotypes <- function(N,L){
+  ### function to simulate genotypes
+  ps <- rbeta(n = L,4,4)
+  G <- matrix(NA,nrow=N,ncol=L)
+  for (i in c(1:L)){
+    gen <- rbinom(N, size = 2, prob = ps[i])
+    G[,i] <- gen
+  }
+  return(G)
+}
+
+give_disease_risk <- function(nodes,f=mean,threshold=5){
+  # returns disease risk/severity 
+  # risk given by some function of the nodes
+  risk <- f(nodes)
+  return(risk)
+}
+
+# a more funk disease function
+mdd_risk <- function(v,threshold=1,n=3){
+  # linear combination of node activation - this is just an example
+  return(sum(v > threshold)>n)
+}
+
+greml <- function( y, G, constrain=F, quantnorm=F ){
+  if( quantnorm ){
+    ranks <- rank(y)
+    quantiles <- qnorm(ranks/(length(ranks) + 1))
+    y <- quantiles
+  }
+  y <- scale(y)
+  G <- scale(G)
+  N <- nrow(G)
+  svdG <- svd(G)
+  out <- eigen_lmm( yprime=t(svdG$u) %*% y, Lam.K=(svdG$d/sqrt(N)+1e-12)^2, constrained=constrain )
+  sig2g <- out$sig2g
+  sig2e <- out$sig2e
+  list( h2=sig2g/(sig2g+sig2e), sig2g=sig2g, sig2e=sig2e )
+}
+
+
+eigen_lmm <- function (yprime, Lam.K, constrained = TRUE) {
+  if (constrained) {
+    delta <-
+      optimise(
+        eigen_lmm_obj,
+        c(0, 1e5),
+        maximum = TRUE,
+        Lam.K = Lam.K,
+        yprime = yprime
+      )$maximum
+  } else {
+    ### these parameters correspond to h^2>0, with h^2>1 for delta<0
+    opt_lims_plus <- c(-min(Lam.K), 1e5)
+    opt_plus <-
+      optimise(
+        eigen_lmm_obj,
+        opt_lims_plus,
+        maximum = TRUE,
+        Lam.K = Lam.K,
+        yprime = yprime
+      )
+    ### these parameters correspond to h^2<0
+    opt_lims_minus <- c(-1000, -max(Lam.K))
+    opt_minus <-
+      optimise(
+        eigen_lmm_obj,
+        opt_lims_minus,
+        maximum = TRUE,
+        Lam.K = Lam.K,
+        yprime = yprime
+      )
+    delta <-
+      ifelse(opt_plus$objective > opt_minus$objective,
+             opt_plus$maximum,
+             opt_minus$maximum)
+  }
+  sig2g <- mean(yprime ^ 2 / (Lam.K + delta))
+  sig2e <- delta * sig2g
+  list(h2 = sig2g / (sig2g + sig2e),
+       sig2g = sig2g,
+       sig2e = sig2e)
+}
+
+
+eigen_lmm_obj <- function(delta, yprime, Lam.K){
+  denominator <- Lam.K + delta
+  sig2g <- mean(yprime^2/denominator)
+  sum(dnorm( yprime, mean=0, sd=sqrt(sig2g*denominator), log=TRUE ))}
+
+sig_from_row <- function(ind.sig,i,n_node){
+  ## function which takes the matrix of individ. level sigmas and builds a covariance matrix which we can draw from
+  
+  # extract relevant row
+  sig_vec <- ind.sig[i,]
+  
+  # make into matrix
+  sig_mat <- matrix(0,n_node,n_node) 
+  sig_mat[lower.tri(sig_mat,diag=TRUE)] <- sig_vec
+  sig_mat[upper.tri(sig_mat)] <- t(sig_mat)[upper.tri(sig_mat)]
+  
+  # how to build diagonal? Here I will add the environmental variances
+  #diag(sig_mat) <- diag(S$Sigma) + diag(sig_mat)
+  
+  return(sig_mat)
+}
+
+
+theme_set(theme_bw())
+```
+
+```{r}
+l <- 200 # number of loci
+N <- 1000 # number of individuals
+P <- 1 # number of symptoms 
+h2 <- 0.9
+reps <- 10
+heritabilities <- seq(0,1,0.2)
+```
+
+
+## Null model: MDD is a function of symptoms, symptoms are IID
+
+```{r}
+G <- simulate_genotypes(N = N,L = l)
+G <- scale(G)
+beta <- matrix(rnorm(P * l),nrow=l) %*% diag(1,P,P) * sqrt(h2 / l)
+e <- matrix(rnorm(P * N),nrow=N) * sqrt(1-h2)
+
+X <- G %*% beta + e
+cov(e)
+cov(G %*% beta)
+cov(X)
+greml(X[,1],G)
+
+Y <- apply(X,1,mdd_risk,threshold=0)
+greml(Y,G)
+
+plot(rowSums(X),Y)
+```
+```{r}
+rows <- data.frame()
+
+
+for (r in c(1:reps)){
+  print(r)
+  for (her in heritabilities){
+    
+    G <- simulate_genotypes(N = N,L = l)
+    G <- scale(G)
+    beta <- matrix(rnorm(P * l),nrow=l) %*% diag(1,P,P) * sqrt(her / l)
+    e <- matrix(rnorm(P * N),nrow=N) * sqrt(1-her)
+  
+    X <- G %*% beta + e
+    Y <- apply(X,1,mdd_risk,threshold=0.5,n=0)
+    
+    res <- greml(Y,G)
+    h2 <- res$h2
+    
+    rows <- rbind(rows,data.frame("h2_symptoms"=her,
+                                  "h2_disease"=h2,
+                                  "sig2g"=res$sig2g,
+                                  "sig2e"=res$sig2e,
+                                  "prev"=sum(Y),
+                                  "rep"=r))
+    
+  }
+}
+
+rows
+```
+```{r}
+rows <- data.frame()
+reps <- 10
+nsymp <- 5
+
+for (r in c(1:reps)){
+  print(r)
+  for (her in heritabilities){
+    for (p in c(1:nsymp)){
+    
+      G <- simulate_genotypes(N = N,L = l)
+      G <- scale(G)
+      beta <- matrix(rnorm(p * l),nrow=l) %*% diag(1,p,p) * sqrt(her / l)
+      e <- matrix(rnorm(p * N),nrow=N) * sqrt(1-her)
+    
+      X <- G %*% beta + e
+      
+      c <- 1
+      Y <- apply(X,1,mdd_risk,threshold=c,n=p-1)
+      prev <- sum(Y)/N
+      
+      while (prev<0.25){
+        c <- c - 0.1
+        Y <- apply(X,1,mdd_risk,threshold=c,n=p-1)
+        prev <- sum(Y)/N
+      }
+      
+      res <- greml(Y,G)
+      h2 <- res$h2
+      
+      rows <- rbind(rows,data.frame("h2_symptoms"=her,
+                                    "h2_disease"=h2,
+                                    "sig2g"=res$sig2g,
+                                    "sig2e"=res$sig2e,
+                                    "prev"=sum(Y),
+                                    "rep"=r,
+                                    "P"=p,
+                                    "c"=c))
+    }
+  }
+}
+
+rows
+```
+
+```{r}
+rows <- rows %>% mutate(h2_l = h2_disease * (prev/N) * (1-prev/N) / dnorm(prev/N)^2)
+```
+
+## How is disease heritability affected by the number of symptoms constituting the disease?
+
+```{r}
+ggplot(rows,aes(x=h2_symptoms,y=h2_disease)) +
+  geom_point(aes(col="oberved h2 of disease (GREML)")) +
+  geom_point(aes(y=h2_l,col="expected h2_l (one symptom)")) +
+  geom_abline(slope=1,intercept=0,lty=2,col="darkgrey") +
+  facet_wrap(~P,nrow=1) +
+  labs(title = "Number of symptoms constituting disease",
+     col="",
+     subtitle = "Independent Symptoms")
+```
+
+```{r}
+rows_n <- data.frame()
+reps <- 10
+p <- 5
+
+for (r in c(1:reps)){
+  print(r)
+  for (her in heritabilities){
+    for (n in c(0:(p-1))){
+      G <- simulate_genotypes(N = N,L = l)
+      G <- scale(G)
+      beta <- matrix(rnorm(p * l),nrow=l) %*% diag(1,p,p) * sqrt(her / l)
+      e <- matrix(rnorm(p * N),nrow=N) * sqrt(1-her)
+    
+      X <- G %*% beta + e
+      
+      c <- 1
+      Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+      prev <- sum(Y)/N
+      
+      while (prev<0.25){
+        c <- c - 0.1
+        Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+        prev <- sum(Y)/N
+      }
+      
+      res <- greml(Y,G)
+      h2 <- res$h2
+      
+      rows_n <- rbind(rows_n,data.frame("h2_symptoms"=her,
+                                    "h2_disease"=h2,
+                                    "sig2g"=res$sig2g,
+                                    "sig2e"=res$sig2e,
+                                    "prev"=sum(Y),
+                                    "rep"=r,
+                                    "P"=p,
+                                    "c"=c,
+                                    "n"=n))
+    }
+  }
+}
+
+rows_n
+
+rows_n <- rows_n %>% mutate(h2_l = h2_disease * (prev/N) * (1-prev/N) / dnorm(prev/N)^2)
+
+```
+## How is disease heritability affected by the number of symptoms required past a threshold for the disease - for a given number of symptoms?
+
+
+```{r}
+ggplot(rows_n,aes(x=h2_symptoms,y=h2_disease)) +
+  geom_point(aes(col="oberved h2 of disease (GREML)")) +
+  geom_point(aes(y=h2_l,col="expected h2_l (one symptom)")) +
+  geom_abline(slope=1,intercept=0,lty=2,col="darkgrey") +
+  facet_wrap(~(n+1),nrow=1) +
+  labs(title = paste("Number of symptoms required past threshold out of",p),
+       col="",
+       subtitle = "Independent Symptoms")
+```
+```{r}
+ggplot(rows_n,aes(x=h2_symptoms,y=h2_disease)) +
+  geom_point(aes(col=factor(n)) )
+```
+
+
+
+```{r}
+ggplot(rows_n,aes(x=h2_symptoms,y=prev/N,col=factor(n))) +
+  geom_point(aes(shape="prevalence")) +
+  labs(y="disease prevalence") +
+  geom_point(aes(y=c,shape="cut-off")) +
+  lims(y=c(0,1))
+```
+
+```{r}
+ggplot(rows,aes(x=h2_symptoms,y=sig2g)) +
+  geom_point(aes(col="sig2g") )+
+  geom_point(aes(y=sig2e,col="sig2e"))
+```
+
+## Slightly less null model: MDD is a function of symptoms, symptoms have a fixed covariance structure
+
+```{r}
+# generate a random covariance matrix for symptoms
+c <- 0.3
+Sigma <- matrix(sample(x=c(0,c),size=P * P,replace=TRUE),byrow = T,ncol=P) # draw covariances 
+diag(Sigma) <- 1 # set diagonal
+Sigma[lower.tri(Sigma)] = t(Sigma)[lower.tri(Sigma)] # make symmetric
+
+# print av of correlations
+```
+
+
+
+```{r,eval=FALSE}
+rows_2 <- data.frame()
+
+for (r in c(1:reps)){
+  for (her in heritabilities){
+    G <- simulate_genotypes(N = N,L = l)
+    G <- scale(G)
+    beta <- matrix(mvrnorm(n=l,mu = rep(0,P),Sigma = Sigma),nrow=l) %*% diag(1,P,P) * sqrt(her / l)
+    e <- matrix(mvrnorm(n=N,mu = rep(0,P),Sigma = Sigma),nrow=N) * sqrt(1-her)
+  
+    X <- G %*% beta + e
+    Y <- apply(X,1,mdd_risk,threshold=0)
+    
+    res <- greml(Y,G)
+    h2 <- res$h2
+    
+    rows_2 <- rbind(rows_2,data.frame("h2_symptoms"=her,
+                                  "h2_disease"=h2,
+                                  "sig2g"=res$sig2g,
+                                  "sig2e"=res$sig2e,
+                                  "prev"=sum(Y),
+                                  "rep"=r))
+    
+  }
+}
+
+rows_2
+```
+
+```{r,eval=F}
+ggplot(rows,aes(x=h2_symptoms,y=h2_disease)) +
+  geom_point() +
+  geom_point(data=rows_2,col="orchid",shape=1)
+```
+
+
+## Our model: MDD is a function of symptoms, covariance structure variable among individuals
+
+Genetic effects on entries of covariance matrix directly.
+
+
+```{r,eval=FALSE}
+rows_3 <- data.frame()
+
+num_covariances <- (P^2-P)/2 +P
+
+for (r in c(1:reps)){
+  for (her in heritabilities){
+    for (hercov in cov_heritabilities){
+      G <- simulate_genotypes(N = N,L = l)
+      G <- scale(G)
+      
+      
+      beta_cov <- matrix(rnorm(num_covariances * l),nrow=l) %*% diag(1,num_covariances,num_covariances) * sqrt(hercov / l)
+      e_cov <- matrix(rnorm(N * num_covariances),nrow=N) * sqrt(1-hercov)
+      covs <- G %*% beta_cov + e_cov
+      
+      beta <- matrix(rnorm(P * l),nrow=l) %*% diag(1,P,P) * sqrt(her / l)
+      e <- matrix(rnorm(P * N),nrow=N) * sqrt(1-her)
+      
+      X <- matrix(0,nrow=N,ncol=P)
+      
+      sig_gg_vecs <- G %*% beta_cov
+      #sig_from_row(sig_gg_vecs,1,P) / 100 + Sigma
+      for (ind in c(1:N)){
+          # make into matrix
+          sig_gg_mat <- matrix(0,P,P) 
+          sig_gg_mat[lower.tri(sig_gg_mat,diag=FALSE)] <- sig_gg_vec
+          sig_gg_mat[upper.tri(sig_gg_mat)] <- t(sig_gg_mat)[upper.tri(sig_gg_mat)]
+          
+          sig_ee_vec <- e_cov[ind,]
+          sig_ee_mat <- matrix(0,P,P) 
+          sig_ee_mat[lower.tri(sig_ee_mat,diag=FALSE)] <- sig_ee_vec
+          sig_ee_mat[upper.tri(sig_ee_mat)] <- t(sig_ee_mat)[upper.tri(sig_ee_mat)]
+  
+          
+  
+          Sig_ind <- Sigma + sig_gg_mat/100 + sig_ee_mat/100 # change scaling constant?
+          # print(sum(eigen(Sig_ind)$values<0)==0)
+          beta_transformed <- beta %*% t(chol(Sig_ind)) # check this
+          e_transformed <- e[ind,] %*% t(chol(Sig_ind)) # check this
+          X[ind,] <- G[ind,] %*% beta_transformed + e_transformed
+          print(Sig_ind)
+      }
+      
+      Y <- apply(X,1,mdd_risk,threshold=0)
+      
+      res <- greml(Y,G)
+      h2 <- res$h2
+      
+      rows_3 <- rbind(rows_3,data.frame("h2_symptoms"=her,
+                                    "h2_disease"=h2,
+                                    "h2_covariance"=hercov,
+                                    "sig2g"=res$sig2g,
+                                    "sig2e"=res$sig2e,
+                                    "prev"=sum(Y),
+                                    "rep"=r))
+      
+    }
+  }
+}
+
+rows_3
+```
+
+```{r}
+rows_3 <- data.frame()
+cov_heritabilities <- seq(0,1,0.2)
+num_covariances <- (P^2-P)/2 +P
+reps <- 5
+
+for (r in c(1:reps)){
+  for (her in heritabilities){
+    for (hercov in cov_heritabilities){
+      print(paste(r,her,hercov))
+      G <- simulate_genotypes(N = N,L = l)
+      G <- scale(G)
+      
+      
+      beta_cov <- matrix(rnorm(num_covariances * l),nrow=l) %*%
+        diag(1,num_covariances,num_covariances) * sqrt(hercov / l)
+      e_cov <- matrix(rnorm(N * num_covariances),nrow=N) * sqrt(1-hercov)
+      covs <- G %*% beta_cov + e_cov
+      
+      beta <- matrix(rnorm(P * l),nrow=l) %*% diag(1,P,P) * sqrt(her / l)
+      e <- matrix(rnorm(P * N),nrow=N) * sqrt(1-her)
+      
+      X <- matrix(0,nrow=N,ncol=P)
+      
+      sig_gg_vecs <- G %*% beta_cov
+      
+      for (ind in c(1:N)){
+          # make into matrix
+          Sig_ind <- sig_from_row(sig_gg_vecs,ind,P) / 20 + sig_from_row(e_cov,ind,P) / 20 +  Sigma
+          eigs <- eigen(Sig_ind)
+          eig_vals <- eigs$values
+          eig_vecs <- eigs$vectors
+          if (sum(eig_vals < 0) > 0) {
+              print("Invalid covariance matrix")
+              eig_vals[eig_vals < 0] <- 0.01  # Replace negative eigenvalues with a small positive value
+              Sig_ind <- eig_vecs %*% diag(eig_vals) %*% t(eig_vecs)
+          }
+          # 
+          beta_transformed <- beta %*% t(chol(Sig_ind)) # check this
+          e_transformed <- e[ind,] %*% t(chol(Sig_ind)) # check this
+          X[ind,] <- G[ind,] %*% beta_transformed + e_transformed
+      }
+      
+      Y <- apply(X,1,mdd_risk,threshold=0)
+      
+      res <- greml(Y,G)
+      h2 <- res$h2
+      
+      rows_3 <- rbind(rows_3,data.frame("h2_symptoms"=her,
+                                    "h2_disease"=h2,
+                                    "h2_covariance"=hercov,
+                                    "sig2g"=res$sig2g,
+                                    "sig2e"=res$sig2e,
+                                    "prev"=sum(Y),
+                                    "rep"=r))
+      
+    }
+  }
+}
+
+rows_3
+```
+
+
+
+```{r}
+ggplot(rows_3,aes(x=h2_symptoms,y=h2_disease,col=factor(h2_covariance))) +
+  geom_point() +
+  geom_smooth(se=F) +
+  labs(col="covariance heritability")
+```
+
+
+## Symptoms are not heritable and there is covariance
+
+```{r}
+rows_n <- data.frame()
+reps <- 10
+p <- 5
+rho <- 0.5
+her <- 0
+
+  
+for (r in c(1:reps)){
+  print(r)
+  for (rho in seq(0,1,0.2)){
+    for (n in c(1:(p-1))){
+      print(paste("Running for rep",r, "heritability", her, "threshold number", n, "rho", rho))
+      G <- simulate_genotypes(N = N,L = l)
+      G <- scale(G)
+      
+      Sigma <- matrix(rho,nrow=p,ncol=p)
+      diag(Sigma) <- 1 
+      
+      beta <- matrix(mvrnorm(n=l,mu = rep(0,p),Sigma = Sigma),nrow=l) %*% diag(1,p,p) * sqrt(her / l)
+      e <- matrix(mvrnorm(n=N,mu = rep(0,p),Sigma = Sigma),nrow=N) * sqrt(1-her)
+    
+      X <- G %*% beta + e
+      
+      c <- 2
+      Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+      prev <- sum(Y)/N
+      
+      while (prev<0.25){
+        c <- c - 0.1
+        Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+        prev <- sum(Y)/N
+      }
+      
+      print(paste("Set threshold",c,"and prevalence",prev))
+      res <- greml(Y,G)
+      h2 <- res$h2
+      
+      rows_n <- rbind(rows_n,data.frame("h2_symptoms"=her,
+                                    "h2_disease"=h2,
+                                    "sig2g"=res$sig2g,
+                                    "sig2e"=res$sig2e,
+                                    "prev"=sum(Y),
+                                    "rep"=r,
+                                    "P"=p,
+                                    "c"=c,
+                                    "n"=n,
+                                    "rho"=rho))
+    }
+  }
+}
+
+rows_n
+
+rows_n <- rows_n %>% mutate(h2_l = h2_disease * (prev/N) * (1-prev/N) / dnorm(prev/N)^2)
+
+```
+```{r}
+ggplot(rows_n,aes(x=n+1,y=h2_disease)) +
+  geom_point(aes(col=factor(rho))) +
+  #geom_point(aes(y=h2_l,col="expected h2_l (one symptom)")) +
+  labs(title = paste("Number of symptoms required past threshold out of",p),
+       col="",
+       subtitle = "Independent Symptoms")
+```
+
+```{r}
+ggplot(rows_n,aes(x=n+1,y=c)) +
+  geom_jitter(aes(col=factor(rho)),height = 0,width=0.2) +
+  #geom_point(aes(y=h2_l,col="expected h2_l (one symptom)")) +
+  labs(title = paste("Number of symptoms required past threshold out of",p),
+       col="Covariance parameter",
+       x="Number of symptoms past threshold",
+       y="threshold")
+```
+
+## Symptoms are not heritable, but covariance is heritable
+
+We model genetic effects on covariance through the diagonal matrix $D$ in the $LDL^T$ decomposition of $\Sigma$. This works in the following way:
+
+$D$ is an $(N \times P)$ matrix of diagonal entries. Each entry of D is independent of the others, but individuals co-vary in accordance with their kinship:
+
+
+$$
+D \sim MN(\mathbf{M},\vec{\sigma^2_{cov,e}}\mathbf{I}_n+\vec{\sigma^2_{cov,g}}\mathbf{K},\mathbf{I}_P)
+$$
+where $\mathbf{M}$ is an $(N \times P)$ matrix where each row is identical, and is the vector $\vec{\sigma^2_X}$. Between rows, there is independent environmental noise as well as genetic effects.
+
+
+
+
+$$
+D = G\beta_{cov} + \epsilon
+$$
+The effect size matrix is $(P \times l)$. $\epsilon_i \sim N(\vec{0}^{p},\vec{\sigma^2_{cov,e}})$. Since everyone has slightly different $D$, each individual's personal symptom covariance matrix varies: 
+
+$$
+\Sigma_i = LD_iL^T
+$$
+And from this, the symptoms are drawn:
+
+$$
+X_i \sim N(\vec{0}^p, \Sigma_i)
+$$
+
+```{r}
+rows_hercov <- data.frame()
+reps <- 10
+p <- 5
+her <- 0
+
+L <- matrix(0,nrow=p,ncol=p)
+L[lower.tri(L,diag=T)] <- 1
+  
+for (r in c(1:reps)){
+  print(r)
+  for (hercov in seq(0,1,0.2)){
+    for (n in c(1:(p-1))){
+      print(paste("Running for rep",r, "heritability", her, "threshold number", n, "covariance heritability", hercov))
+      G <- simulate_genotypes(N = N,L = l)
+      G <- scale(G)
+      
+      # effect sizes on D
+      beta_cov <- matrix(mvrnorm(n=l,mu = rep(0,p),Sigma = diag(p)),nrow=l) %*% diag(3,p,p) * sqrt(hercov / l)
+      e_cov <- matrix(mvrnorm(n=N,mu = rep(0,p),Sigma = diag(p)),nrow=N) %*% diag(3,p,p) * sqrt(1-hercov)
+      # individual-level D
+      D_vectors <- G %*% beta_cov + e_cov + matrix(10,nrow=N,ncol=p)
+      D_vectors[D_vectors<0] <- 0.001
+      
+      # effect sizes on trait directly
+      beta <- matrix(mvrnorm(n=l,mu = rep(0,p),Sigma = diag(5,p,p)),nrow=l) %*% diag(1,p,p) * sqrt(her / l)
+      e <- matrix(mvrnorm(n=N,mu = rep(0,p),Sigma = diag(5,p,p)),nrow=N) * sqrt(1-her)
+      
+      X <- matrix(0,nrow=N,ncol=p)
+      # Give each person a covariance matrix and draw symptoms
+      for (ind in c(1:N)){
+          # make into matrix
+          Sig_ind <- L %*% diag(D_vectors[ind,]) %*% t(L)
+          beta_transformed <- t(chol(Sig_ind)) %*% t(beta) %>% t() # check this
+          e_transformed <- t(chol(Sig_ind)) %*% e[ind,] %>% t() # check this
+          X[ind,] <- G[ind,] %*% beta_transformed + e_transformed
+      }
+      
+      # setting the threshold to keep constant prevalence
+      c <- 10
+      Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+      prev <- sum(Y)/N
+      
+      while (prev<0.25){
+        c <- c - 0.1
+        Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+        prev <- sum(Y)/N
+      }
+      
+      print(paste("Set threshold",c,"and prevalence",prev))
+      res <- greml(Y,G)
+      h2 <- res$h2
+      
+      rows_hercov <- rbind(rows_hercov,data.frame("h2_symptoms"=her,
+                                    "h2_disease"=h2,
+                                    "sig2g"=res$sig2g,
+                                    "sig2e"=res$sig2e,
+                                    "prev"=sum(Y),
+                                    "rep"=r,
+                                    "P"=p,
+                                    "c"=c,
+                                    "n"=n,
+                                    "hercov"=hercov))
+    }
+  }
+}
+
+rows_hercov
+
+rows_hercov <- rows_hercov %>% mutate(h2_l = h2_disease * (prev/N) * (1-prev/N) / dnorm(prev/N)^2)
+
+```
+
+```{r}
+ggplot(rows_hercov,aes(x=hercov,y=h2_disease)) +
+  geom_point(aes(col=factor(n+1))) +
+  #geom_point(aes(y=h2_l,col="expected h2_l (one symptom)")) +
+  labs(x="Covariance heritability",
+       col="Number of symptoms past threshold",
+       y="Disease heritability")
+```
+
+```{r}
+ggplot(rows_hercov,aes(x=hercov,y=h2_l)) +
+  geom_point(aes(col=factor(n+1))) 
+```
+
+## GWAS on individual-level products
+
+
+```{r}
+N <- 5000
+l <- 200
+G <- simulate_genotypes(N = N,L = l)
+G <- scale(G)
+p <- 5
+hercov <- .9
+her <- .1
+L <- matrix(0,nrow=p,ncol=p)
+L[lower.tri(L,diag=T)] <- 1
+diag(L) <- 1
+
+beta_cov <- matrix(mvrnorm(n=l,mu = rep(0,p),Sigma = diag(p)),nrow=l) %*% diag(3,p,p) * sqrt(hercov / l)
+e_cov <- matrix(mvrnorm(n=N,mu = rep(0,p),Sigma = diag(p)),nrow=N) %*% diag(3,p,p) * sqrt(1-hercov)
+D_vectors <- G %*% beta_cov + e_cov + matrix(10,nrow=N,ncol=p)
+D_vectors[D_vectors<0] <- 0.1
+
+
+beta <- matrix(mvrnorm(n=l,mu = rep(0,p),Sigma = diag(5,p,p)),nrow=l) %*% diag(1,p,p) * sqrt(her / l)
+e <- matrix(mvrnorm(n=N,mu = rep(0,p),Sigma = diag(5,p,p)),nrow=N) * sqrt(1-her)
+
+X <- matrix(0,nrow=N,ncol=p)
+# Give each person a covariance matrix and draw symptoms
+for (ind in c(1:N)){
+    # make into matrix
+    Sig_ind <- L %*% diag(D_vectors[ind,]) %*% t(L)
+    beta_transformed <- t(chol(Sig_ind)) %*% t(beta) %>% t() # check this
+    e_transformed <- t(chol(Sig_ind)) %*% e[ind,] %>% t() # check this
+    X[ind,] <- G[ind,] %*% beta_transformed + e_transformed
+}
+
+# setting the threshold to keep constant prevalence
+c <- 1
+n <- 3
+Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+prev <- sum(Y)/N
+```
+
+
+```{r}
+lm(X.1 *X.2 ~ D.1 + D.2 + D.3, data= data.frame("X"=X,"D"=D_vectors)) %>% summary()
+lm(X.1 > c & X.2 > c ~ D.1, data= data.frame("X"=X,"D"=D_vectors)) %>% summary()
+
+data.frame("X"=X,"D"=D_vectors,"Y"=Y) %>%
+ggplot(aes(y=X.1*X.2,x=D.1)) + geom_point() +
+  geom_smooth()
+
+data.frame("X"=X,"D"=D_vectors,"Y"=Y) %>%
+ggplot(aes(y=X.1*X.2,x=Y)) + geom_boxplot()
+
+
+data.frame("X"=X,"D"=D_vectors) %>%
+ggplot(aes(y=X.1>c & X.2 > c,x=D.1)) + geom_point() 
+
+
+data.frame("X"=X,"D"=D_vectors,"Y"=Y) %>% group_by(X.1>c & X.2 > c) %>% summarise(D = mean(D.1),X12 = mean(X.1*X.2),Yprv= mean(Y))
+```
+
+
+```{r}
+IP <- X[,1]*X[,2]
+
+res <- apply(G , 2, function(x) lm(IP ~ x))
+p_hats <- sapply(res, function(x) summary(x)$coefficients[2, 4])
+beta_hats <- sapply(res, function(x) summary(x)$coefficients[2, 1])
+
+
+plot(beta_cov[,1],beta_hats)
+
+lm(beta_hats ~ beta_cov[,1]) %>% summary()
+summary(res[[1]])$coefficients[2,1]
+```
+
+
+```{r}
+cov(X[,1:5])/5
+colMeans(D_vectors)
+```
+
+
+```{r}
+rows_hercov2 <- data.frame()
+reps <- 5
+p <- 5
+her <- 0
+
+D <- diag(1,p,p)
+L[lower.tri(L,diag=T)] <- 1
+  
+for (r in c(1:reps)){
+  print(r)
+  for (hercov in seq(0,1,0.2)){
+    for (n in c(1:(p-1))){
+      print(paste("Running for rep",r, "heritability", her, "threshold number", n, "covariance heritability", hercov))
+      G <- simulate_genotypes(N = N,L = l)
+      G <- scale(G)
+      K <- G %*% t(G) / l
+      
+      n_l <- (p ^ 2 - p) / 2
+      beta_l <- matrix(mvrnorm(n=l,mu = rep(0,n_l),Sigma = diag(n_l)),nrow=l) %*% diag(1,n_l,n_l) * sqrt(hercov / l)
+      e_l <- matrix(mvrnorm(n=N,mu = rep(0,n_l),Sigma = diag(n_l)),nrow=N) * sqrt(1-hercov)
+      L_vectors <- G %*% beta_l + e_l 
+      
+      
+      beta <- matrix(mvrnorm(n=l,mu = rep(0,p),Sigma = D),nrow=l) %*% diag(1,p,p) * sqrt(her / l)
+      e <- matrix(mvrnorm(n=N,mu = rep(0,p),Sigma = D),nrow=N) * sqrt(1-her)
+
+      for (ind in c(1:N)){
+          # make into matrix
+          L_ind <- matrix(0,p,p)
+          L_ind[lower.tri(L_ind,diag = F)] <- L_vectors[ind,]
+          diag(L_ind) <- rep(1,p)
+          Sig_ind <- L_ind %*% D %*% t(L_ind)
+          beta_transformed <- beta %*% t(chol(Sig_ind)) # check this
+          e_transformed <- e[ind,] %*% t(chol(Sig_ind)) # check this
+          X[ind,] <- G[ind,] %*% beta_transformed + e_transformed
+      }
+      
+      
+      c <- 2
+      Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+      prev <- sum(Y)/N
+      
+      while (prev<0.25){
+        c <- c - 0.1
+        Y <- apply(X,1,mdd_risk,threshold=c,n=n)
+        prev <- sum(Y)/N
+      }
+      
+      print(paste("Set threshold",c,"and prevalence",prev))
+      res <- greml(Y,G)
+      h2 <- res$h2
+      
+      rows_hercov2 <- rbind(rows_hercov2,data.frame("h2_symptoms"=her,
+                                    "h2_disease"=h2,
+                                    "sig2g"=res$sig2g,
+                                    "sig2e"=res$sig2e,
+                                    "prev"=sum(Y),
+                                    "rep"=r,
+                                    "P"=p,
+                                    "c"=c,
+                                    "n"=n,
+                                    "hercov"=hercov))
+    }
+  }
+}
+
+rows_hercov2
+
+rows_hercov2 <- rows_hercov2 %>% mutate(h2_l = h2_disease * (prev/N) * (1-prev/N) / dnorm(prev/N)^2)
+
+```
+
+
+
+```{r}
+ggplot(rows_hercov2,aes(x=hercov,y=h2_disease)) +
+  geom_point(aes(col=factor(n+1))) +
+  #geom_point(aes(y=h2_l,col="expected h2_l (one symptom)")) +
+  labs(x="Covariance heritability",
+       col="Number of symptoms past threshold",
+       y="Disease heritability")
+```
+
+

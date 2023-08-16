@@ -1,0 +1,285 @@
+---
+title: "GWAS to find covariance QTLs"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+```{r,include=F}
+library(tidyverse)
+library(MASS)
+library(fastmatrix)
+library(tidyverse)
+library(matlib)
+library(ggcorrplot)
+
+simulate_genotypes <- function(N,L){
+  ### function to simulate genotypes
+  ps <- rbeta(n = L,4,4)
+  G <- matrix(NA,nrow=N,ncol=L)
+  for (i in c(1:L)){
+    gen <- rbinom(N, size = 2, prob = ps[i])
+    G[,i] <- gen
+  }
+  return(G)
+}
+
+give_disease_risk <- function(nodes,f=mean,threshold=5){
+  # returns disease risk/severity 
+  # risk given by some function of the nodes
+  risk <- f(nodes)
+  return(risk)
+}
+
+# a more funk disease function
+mdd_risk <- function(v,threshold=1,n=3){
+  # linear combination of node activation - this is just an example
+  return(sum(v > threshold)>n)
+}
+
+greml <- function( y, G, constrain=F, quantnorm=F ){
+  if( quantnorm ){
+    ranks <- rank(y)
+    quantiles <- qnorm(ranks/(length(ranks) + 1))
+    y <- quantiles
+  }
+  y <- scale(y)
+  G <- scale(G)
+  N <- nrow(G)
+  svdG <- svd(G)
+  out <- eigen_lmm( yprime=t(svdG$u) %*% y, Lam.K=(svdG$d/sqrt(N)+1e-12)^2, constrained=constrain )
+  sig2g <- out$sig2g
+  sig2e <- out$sig2e
+  list( h2=sig2g/(sig2g+sig2e), sig2g=sig2g, sig2e=sig2e )
+}
+
+
+eigen_lmm <- function (yprime, Lam.K, constrained = TRUE) {
+  if (constrained) {
+    delta <-
+      optimise(
+        eigen_lmm_obj,
+        c(0, 1e5),
+        maximum = TRUE,
+        Lam.K = Lam.K,
+        yprime = yprime
+      )$maximum
+  } else {
+    ### these parameters correspond to h^2>0, with h^2>1 for delta<0
+    opt_lims_plus <- c(-min(Lam.K), 1e5)
+    opt_plus <-
+      optimise(
+        eigen_lmm_obj,
+        opt_lims_plus,
+        maximum = TRUE,
+        Lam.K = Lam.K,
+        yprime = yprime
+      )
+    ### these parameters correspond to h^2<0
+    opt_lims_minus <- c(-1000, -max(Lam.K))
+    opt_minus <-
+      optimise(
+        eigen_lmm_obj,
+        opt_lims_minus,
+        maximum = TRUE,
+        Lam.K = Lam.K,
+        yprime = yprime
+      )
+    delta <-
+      ifelse(opt_plus$objective > opt_minus$objective,
+             opt_plus$maximum,
+             opt_minus$maximum)
+  }
+  sig2g <- mean(yprime ^ 2 / (Lam.K + delta))
+  sig2e <- delta * sig2g
+  list(h2 = sig2g / (sig2g + sig2e),
+       sig2g = sig2g,
+       sig2e = sig2e)
+}
+
+
+eigen_lmm_obj <- function(delta, yprime, Lam.K){
+  denominator <- Lam.K + delta
+  sig2g <- mean(yprime^2/denominator)
+  sum(dnorm( yprime, mean=0, sd=sqrt(sig2g*denominator), log=TRUE ))}
+
+sig_from_row <- function(ind.sig,i,n_node){
+  ## function which takes the matrix of individ. level sigmas and builds a covariance matrix which we can draw from
+  
+  # extract relevant row
+  sig_vec <- ind.sig[i,]
+  
+  # make into matrix
+  sig_mat <- matrix(0,n_node,n_node) 
+  sig_mat[lower.tri(sig_mat,diag=TRUE)] <- sig_vec
+  sig_mat[upper.tri(sig_mat)] <- t(sig_mat)[upper.tri(sig_mat)]
+  
+  return(sig_mat)
+}
+
+scale01 <- function (x)
+{
+  x <- x - min(x, na.rm = T) + 1e-8
+  x <- x/max(x, na.rm = T) - 1e-8
+  x
+}
+
+theme_set(theme_bw())
+```
+
+### Background
+
+Suppose you have a disease, $Y$, which depends on a set of symptoms $X$ through some function $f(X)$. To make this more concrete, we'll use the example of major depressive disorder (MDD), which is diagnosed via a questionnaire asking about a set of symptoms (anxiety, feelings of despair...). The patient muse have at least a certain number of these symptoms to be diagnosed with the disease. 
+
+The symptoms co-vary. Suppose that they co-vary differently in every individual, due to genetics. In fact, someone is more likely to have the disease if their symptoms co-vary more. 
+
+In this notebook, we want to show that a certain amount of heritability can be explained through genetic effects on symptom covariance, even when symptoms themselves are not heritable.
+
+### Model
+
+\begin{align*}
+&w   &\sim N(0,h^2_w K + (1-h^2_w) I ) \\
+&\Sigma_i &:= w_i J + (1-w_i) I \\
+&X_{i,} | \Sigma_i &  N(0,\Sigma_i) \\
+&y_i &= f(X_{i,} )
+\end{align*}
+
+Where $J$ is a matrix of ones. The higher an individual's covariance weight $w$, the more covariance there is between their symptoms. 
+
+### Simulating genetic effects on the covariance
+
+
+```{r}
+### Defining parameters
+N <- 20000 # number of individuals
+l <- 100 # number of loci - don't need many for GREML
+reps <- 10 # number of replicates
+p <- 2 # number of symptoms
+hercovs <- seq(0,1,0.1) # heritability of covariance
+her <- 0 # heritability of symptoms
+
+# admin
+J <- matrix(1,p,p)
+rows <- data.frame()
+
+for (r in c(1:reps)){
+  print(paste("At replicate",r))
+  for (hercov in hercovs){
+    # simulate a genotype matrix
+    G <- simulate_genotypes(N = N,L = l)
+    G <- scale(G)
+    # genetic effects on covariance
+    beta_cov <- matrix(mvrnorm(n=l,mu = rep(0,1),Sigma = diag(1)),nrow=l) %*% diag(1,1,1) * sqrt(hercov / l)
+    e_cov <- matrix(mvrnorm(n=N,mu = rep(0,1),Sigma = diag(1)),nrow=N) %*% diag(1,1,1) * sqrt(1-hercov)
+    J_weights <- G %*% beta_cov + e_cov
+    J_weights <- scale01(J_weights)
+    # genetic effects on symtpoms
+    beta <- matrix(mvrnorm(n=l,mu = rep(0,p),Sigma = diag(5,p,p)),nrow=l) %*% diag(1,p,p) * sqrt(her / l)
+    e <- matrix(mvrnorm(n=N,mu = rep(0,p),Sigma = diag(5,p,p)),nrow=N) * sqrt(1-her)
+    # symptom matrix
+    X <- matrix(0,nrow=N,ncol=p)
+    # Give each person a covariance matrix and draw symptoms
+    for (ind in c(1:N)){
+        # get weight
+        ind_J_weight <- J_weights[ind]
+        Sig_ind <- ind_J_weight * J + (1-ind_J_weight) * diag(1,p,p)
+        beta_transformed <- t(chol(Sig_ind)) %*% t(beta) %>% t() # check this
+        e_transformed <- t(chol(Sig_ind)) %*% e[ind,] %>% t() # check this
+        X[ind,] <- G[ind,] %*% beta_transformed + e_transformed
+    }
+    # give the disease
+    Y <- apply(X,1,mdd_risk,threshold=1,n=1)
+    prev <- sum(Y)/N
+    # estimating heritabilities
+    h2J <- greml(J_weights,G)$h2
+    h2IP <- greml(X[,1] * X[,2],G)$h2
+    h2Y <- greml(Y,G)$h2
+    
+    rows <- rbind(rows,data.frame("h2_symptoms"=her,
+                              "h2_Y"=h2Y,
+                              "h2_IP"=h2IP,
+                              "h2_J"=h2J,
+                              "prev"=prev,
+                              "rep"=r,
+                              "P"=p,
+                              "c"=c,
+                              "n"=n,
+                              "hercov"=hercov))
+  }
+}
+
+rows <- rows %>% mutate(h2_liability = h2_Y * (prev) * (1-prev) / dnorm(prev)^2)
+
+```
+
+### Does the base covariance affect heritability?
+
+```{r}
+rows %>% 
+  pivot_longer(cols=c("h2_J","h2_liability","h2_IP"),names_to = "feature",values_to = "GREML heritability") %>%
+  ggplot(aes(x=hercov,col=feature,y=`GREML heritability`))+
+  geom_point() +
+  geom_smooth(method="lm",se=F,linetype=2,linewidth=0.5,alpha=0.5) +
+  labs(x="true covariance heritability")
+```
+
+### How is the covariance heritability affecting disease prevalence?
+
+```{r}
+rows %>% 
+ggplot(aes(x=hercov,y=prev))+
+  geom_point() +
+  geom_smooth(method="lm",se=F,linetype=2,linewidth=0.5,alpha=0.5) +
+  labs(x="base covariance")
+```
+
+Not very much - which is great! Now we inspect the data from the last simulation, where the covariance heritability was 1:
+
+```{r}
+phenos <- data.frame(X,Y,J=J_weights) %>%
+  mutate(IP12=((X1-mean(X1))* (X2-mean(X2)))/sqrt(var(X1)*var(X2))) # normalised IP
+```
+
+```{r}
+ggplot(phenos) + geom_point(aes(x=X1,y=X2,col=IP12),shape=16) + scale_color_viridis_c()
+
+ggplot(phenos) + geom_point(aes(x=X1,y=X2,col=Y),shape=16) 
+
+ggplot(phenos) + geom_point(aes(x=J,y=IP12,col=Y)) 
+
+ggplot(phenos) + geom_boxplot(aes(x=J,y=Y)) 
+```
+And infer effect sizes:
+
+```{r}
+apply(G,2,function(x) lm(phenos$IP12 ~ x)$coefficients[2]) -> GWAS_IP
+apply(G,2,function(x) lm(phenos$J ~ x)$coefficients[2]) -> GWAS_J
+apply(G,2,function(x) lm(phenos$X1 ~ x)$coefficients[2]) -> GWAS_X1
+apply(G,2,function(x) lm(phenos$X2 ~ x)$coefficients[2]) -> GWAS_X2
+apply(G,2,function(x) lm(phenos$Y ~ x)$coefficients[2]) -> GWAS_Y
+data.frame(beta=beta_cov[,1],
+           beta_hat_J=GWAS_J,
+           beta_hat_IP=GWAS_IP,
+           beta_hat_Y=GWAS_Y,
+           beta_hat_X1=GWAS_X1,
+           beta_hat_X2=GWAS_X2
+           ) -> GWAS
+```
+
+
+```{r}
+GWAS %>% ggplot(aes(x=beta,y=beta_hat_J)) + geom_point() +geom_smooth(method="lm")
+GWAS %>% ggplot(aes(x=beta,y=beta_hat_IP)) + geom_point() +geom_smooth(method="lm")
+GWAS %>% ggplot(aes(x=beta,y=beta_hat_X1)) + geom_point() +geom_smooth(method="lm")
+GWAS %>% ggplot(aes(x=beta,y=beta_hat_X2)) + geom_point() +geom_smooth(method="lm") 
+GWAS %>% ggplot(aes(x=beta,y=beta_hat_Y)) + geom_point() +geom_smooth(method="lm") 
+```
+
+The plot of the inferred effect sizes for the disease compared to the true effect sizes is very encouraging!
+
+```{r}
+GWAS %>% cor() %>% ggcorrplot(method="circle")
+```
+
