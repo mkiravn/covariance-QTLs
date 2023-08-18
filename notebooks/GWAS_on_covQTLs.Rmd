@@ -1,6 +1,7 @@
 ---
 title: "GWAS to find covariance QTLs"
 output:
+  pdf_document: default
   html_document:
     df_print: paged
 ---
@@ -204,8 +205,6 @@ for (r in c(1:reps)){
                               "prev"=prev,
                               "rep"=r,
                               "P"=p,
-                              "c"=c,
-                              "n"=n,
                               "hercov"=hercov))
   }
 }

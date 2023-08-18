@@ -1,6 +1,7 @@
 ---
 title: "Gradient descent to estimate w"
 output:
+  pdf_document: default
   html_document:
     df_print: paged
 ---
@@ -117,7 +118,7 @@ Now we simulate the symptoms:
 
 ```{r}
 h20 <- 0.5
-p <- 2
+p <- 7
 w <- 0.5
 Sigma_i <- w * matrix(1,p,p) + (1-w) * diag(1,p,p)
 
@@ -175,32 +176,27 @@ Let's write some functions to get the gradient with respect to w. I will separat
 
 
 $$
-\nabla_{w_j} \ell^{cov} 
-= dp/( 1-w_j ) (  1 - p ) + 1/( 1-w_j )^2 (X_{j,}^T (- I  + J r_j ) X_{j,})
+\nabla_{w_i,cov}\ell = -\frac{1}{2}\left(\frac{pw_i}{(w_i^2-1)}  + \frac{1}{(w_i-1)^2}X_{i,}^T \left( I -\frac{w_i^2+p-1}{(1+w_i)^2(p-1)}J\right)X_{i,}\right)
 $$
-where $p$ is the number of symptoms, $d = \frac{1}{(1-w_j)/w_j+p}$, and $r_j= 1 -  2 ( d p + d ) + d^2 p^2 - d^2 p$
-
 
 ```{r}
-get_d <- function(wj,p){
-  return(1/((1-wj)/wj+p))
-}
-
-get_r <- function(d,p){
-  return(1 -  2 *  ( d * p + d ) + d^2 * p^2 - d^2* p)
-}
-
 grad_cov <- function(X,j,w){
   
   wj <- w[j]
 
   p <- dim(X)[2]
-  dj <- get_d(wj,p)
-  rj <- get_r(dj,p)
 
-  g <- dj * p / ((1 - wj) * (1 - p)) + 1 / (1 - wj) ^ 2 *
-    t(matrix(X[j, ])) %*% (-diag(1, p, p) + rj * matrix(1, p, p)) %*% matrix(X[j, ])
+  g <- (p*wj)/(wj^2-1) *
+    (1/(wj-1)^2)*t(matrix(X[j, ])) %*% (diag(1, p, p) - ((wj^2+p-1)/((1+wj)^2*(p-1))) * matrix(1, p, p)) %*% matrix(X[j, ])
+  
+    g <- ((p-1)*p*wj)/((wj-1)*(wj*(p-1)+1)) +
+     (1/(wj-1)^2)*t(matrix(X[j, ])) %*% (diag(1, p, p) - ((1+wj^2*(p-1)*(p+1))/(wj*(p-1)+1)^2) * matrix(1, p, p)) %*% matrix(X[j, ])
 
+  g <- - 0.5 * g
+  
+  if (is.infinite(g)){
+    g <- 0
+  }
   return(g)
 }
 ```
@@ -211,17 +207,19 @@ grad_cov <- function(X,j,w){
 ```{r}
 gc <- c()
 
-j <- 12
-for (weight in seq(-1,1,0.1)){
+j <- 456
+for (weight in seq(-0.9,0.9,0.1)){
   wj <- weight
 
   p <- dim(X)[2]
-  dj <- get_d(wj,p)
-  rj <- get_r(dj,p)
 
-  g <- dj * p / ((1 - wj) * (1 - p)) + 1 / (1 - wj) ^ 2 *
-    t(matrix(X[j, ])) %*% (-diag(1, p, p) + rj * matrix(1, p, p)) %*% matrix(X[j, ])
+  g <- (p*wj)/(wj^2-1) *
+    (1/(wj-1)^2)*t(matrix(X[j, ])) %*% (diag(1, p, p) - ((wj^2+p-1)/((1+wj)^2*(p-1))) * matrix(1, p, p)) %*% matrix(X[j, ])
   
+  g <- ((p-1)*p*wj)/((wj-1)*(wj*(p-1)+1)) +
+     (1/(wj-1)^2)*t(matrix(X[j, ])) %*% (diag(1, p, p) - ((1+wj^2*(p-1)*(p+1))/(wj*(p-1)+1)^2) * matrix(1, p, p)) %*% matrix(X[j, ])
+  
+  g <- g * -0.5
   gc <- c(gc,g)
 }
 
@@ -229,7 +227,7 @@ df$IP12[j]
 J_weights[j]
 X[j,]
 
-plot(seq(-1,1,0.1),gc,xlim = c(-3,3))
+plot(seq(-0.9,0.9,0.1),gc,xlim = c(-3,3),type="l")
 abline(v=df$IP12[j],col="orchid",lty=2) # should be the maximum since we haven't factored in kinship
 abline(v=J_weights[j],col="cyan2",lty=2) # the true weight
 ```
@@ -240,7 +238,7 @@ The second part of the gradient includes information from the kinship matrix - i
 
 $$
 \nabla_{w_j} \ell^{rel} 
-= 2 (h^2_w K + (1-h^2_w)I)^{-1})_{j,} w
+= - (h^2_w K + (1-h^2_w)I)^{-1})_{j,} w
 $$
 This step is more time intensive because we need the inverse of the $w$ covariance matrix. We can lighten it up by noting that 
 
@@ -258,75 +256,56 @@ Lam <- eigenK$values
 
 grad_rel <- function(h2,j,w,K){
   
-  2 * chol2inv(h2 * K + (1-h2) * diag(1,dim(K)[1]))[j,] %*% matrix(w)
+  - chol2inv(h2 * K + (1-h2) * diag(1,dim(K)[1]))[j,] %*% matrix(w)
   
 }
 
 grad_rel(h2=0.5,j=3,w,K)
 ```
 
-
---- not true below
-
-So
-\begin{align}
--2( h^2_w K + (1-h^2_w) I )_j^{-1} w &= [-2Q( h^2_w\Lambda + (1-h^2_w)I)_j^{-1}Q^Tw]_j \\
-  &= [-2Q(1/(h^2_w\Lambda_j + (1-h^2_w))I)Q^Tw]_j \\
-  &= -2(1/(h^2_w\Lambda_j + (1-h^2_w)))[QQ^Tw]_j
-\end{align}
-
-```{r}
-# precompute some stuff
-K <- cor(t(G))
-eigenK <- eigen(K)
-Q <- eigenK$vectors
-Lam <- eigenK$values
-
-QQt <- Q %*% t(Q) # this is the identity
-
-grad_rel <- function(h2,j,w,QQt,Lam){
-  
-  Qw <- QQt %*% matrix(w)
-  return(-2 * (1/(h2 * Lam[j]  + (1-h2)))  * Qw[j])
-  
-}
-
-grad_rel(h2=0.5,j=c(1:N),w,QQt,Lam)
-```
-
-
-
-Now the algorithm
+Now the algorithm:
 
 
 ```{r}
-maxit <- 100
+maxit <- 10
 stepsize <- 0.001
 
 # step 1: initialise w and h2
-w <- df$IP12
-w <- J_weights
+w <- scale01(df$IP12)
+#w <- J_weights
 h2 <- greml(w,G)$h2
 print(h2)
 print(paste("squared norm of true minus estimated weights:", sum(J_weights-w)^2))
-
+plot(xlim = c(1,maxit),x=0,y=0,ylim=c(10e13,10e16),log="y")
 # step 2: iterate
 for (it in c(1:maxit)){
   ### take each element w and update based on gradient
-
+  gradient <- 0
   for (i in c(1:length(w))){
-
+    
     gc <- grad_cov(X,i,w)
     gr <- grad_rel(h2,i,w,K)
 
     gradw <- gc + gr
+    gradient <- gradient + gradw
     
-    new_wj <- w[i] - stepsize * gradw
+    new_wj <- w[i] + stepsize * gradw
+    
+    # projected gradient descent
+    if (as.numeric(new_wj) < 0){
+      new_wj <- 0 + .00001
+    }
+    
+    if (as.numeric(new_wj) > 1){
+      new_wj <- 1 - .00001
+    }
+    
     w[i] <- new_wj
   }
-  
+  print(paste("Gradient:", gradient))
+  points(x=it,y=gradient,pch=16)
   print(w[1:10])
-  
+  print(J_weights[1:10])
   print(paste("squared norm of true minus estimated weights:", mean((J_weights-w)^2))) # should be decreasing
   
   h2 <- greml(w,G)$h2
@@ -336,7 +315,20 @@ for (it in c(1:maxit)){
 }
 
 print(head(w))
+```
 
+
+```{r}
+plot(J_weights,scale01(df$IP12),pch=16)
+points(J_weights,w,pch=16,col="orchid")
+plot(df$IP12,w,pch=16)
+```
+
+
+```{r}
+plot(as.vector(K),w%*%t(w)/N)
+
+cor.test(as.vector(K),as.vector(w%*%t(w)/N))
 ```
 
 
@@ -344,3 +336,15 @@ Problems:
 
 * We appear to be getting further from the true weights, not closer.
 * Entries in $w$ are unconstrained, so they now go over 1 and below -1, which should not be allowed. However, scaling $w$ after every iteration doesn't fix this.
+
+
+```{r}
+w <- .0235
+p <- 9
+J<- matrix(1,p,p)
+I<- diag(p)
+Sig <- w * J + (1-w) * I
+all.equal( solve(Sig), 1/(1-w) * ( I - w/( (1+w)*(p-1) ) * J ) )
+all.equal( solve(Sig), 1/(1-w) * ( I - w/( 1+w*(p-1) ) * J )) 
+```
+

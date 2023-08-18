@@ -1,6 +1,9 @@
 ---
 title: "Expploring disease activation functions"
-output: html_notebook
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
 ---
 
 In this notebook, we'll look at how changing the disease activation fucntion affects prevalence, heritability, etc.
